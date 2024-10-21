@@ -7,19 +7,21 @@ if (args.length == 0) {
   process.exit(1);
 } else {
   if (args[0] == "form") {
-    form(args.slice(1));
+    await form(args.slice(1));
   } else {
     console.log("Unknown command:", args[0]);
     process.exit(1);
   }
 }
 
-// Generate new form shadcn form from fields
+// Generate shadcn-svelte form from fields
 type Field = { name: string; type: string };
 
 function renderInput({ name, type }: Field): string {
   if (type == "textarea") {
     return `<Textarea {...attrs} bind:value={$formData.${name}} rows={4} />`;
+  } else if (type == "files") {
+    return `<Input {...attrs} bind:value={$formData.${name}} type="file" multiple />`;
   } else {
     return `<Input {...attrs} bind:value={$formData.${name}} type="${type}" />`;
   }
@@ -46,16 +48,40 @@ function renderHeader(renderedFields: string): string {
   return output.trimEnd();
 }
 
-function form(args: string[]) {
+function renderFormType(renderedFields: string): string {
+  if (renderedFields.includes(`type="file"`)) {
+    return ` enctype="multipart/form-data"`
+  } else {
+    return ""
+  }
+}
+
+function renderSchemaField({ name, type }: Field): string {
+  if (type == "email") {
+    return `  ${name}: z.string().email(),`;
+  } else if (type == "password") {
+    return `  ${name}: z.string().min(8, { message: "Password must be minimum 8 characters" }),`;
+  } else if (type == "number") {
+    return `  ${name}: z.number(),`;
+  } else if (type == "file") {
+    return `  ${name}: z.instanceof(File),`;
+  } else if (type == "files") {
+    return `  ${name}: z.array(z.instanceof(File)),`;
+  } else {
+    return `  ${name}: z.string(),`;
+  }
+}
+
+async function form(args: string[]) {
   // Parse fields
-  const fields = args.map(arg => {
+  const fields = args.map<Field>(arg => {
     const [name, type] = arg.split(':');
     return { name, type };
   });
-  const renderedFields = fields.map(renderField).join("\n\n");
-  const renderedHeader = renderHeader(renderedFields);
 
   // Generate +page.svelte
+  const renderedFields = fields.map(renderField).join("\n\n");
+  const renderedHeader = renderHeader(renderedFields);
   const pageSvelte = `<script lang="ts">
   import * as Form from "$ui/form";
 ${renderedHeader}
@@ -68,16 +94,52 @@ ${renderedHeader}
   const { form: formData, delayed, submitting, enhance } = form;
 </script>
 
-<form class="grid gap-2" method="post" use:enhance>
+<form class="grid gap-2" method="post"${renderFormType(renderedFields)} use:enhance>
 ${renderedFields}
 
   <Form.Button disabled={$submitting}>
     {#if $delayed}
       <Loader class="animate-spin" />
     {:else}
-      Login
+      Submit
     {/if}
   </Form.Button>
 </form>`;
-  console.log(pageSvelte);
+
+  // Generate +page.server.ts
+  const renderedSchemaFields = fields.map(renderSchemaField).join("\n").trimEnd();
+  const pageServer = `import type { Actions, PageServerLoad } from "./$types";
+import { z } from "zod";
+import { zod } from "sveltekit-superforms/adapters";
+import { fail, superValidate } from "sveltekit-superforms";
+
+const schema = z.object({
+${renderedSchemaFields}
+});
+
+export const load: PageServerLoad = async () => {
+  // Initialize form
+  return {
+    form: await superValidate(zod(schema)),
+  };
+};
+
+export const actions: Actions = {
+  default: async ({ request }) => {
+    // Validate form
+    const form = await superValidate(request, zod(schema));
+    if (!form.valid) return fail(400, { form });
+    const { ${fields.map(field => field.name).join(", ")} } = form.data;
+
+    // Business logic
+  },
+};`;
+
+  // Create files
+  await Promise.all([
+    Bun.write("+page.svelte", pageSvelte),
+    Bun.write("+page.server.ts", pageServer),
+  ]);
+  console.log(`Created +page.svelte`);
+  console.log(`Created +page.server.ts`);
 }
